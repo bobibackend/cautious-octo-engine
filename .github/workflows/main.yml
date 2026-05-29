@@ -628,8 +628,10 @@ jobs:
           }
       - name: 📦 Create ZIP Archive and Push to Private Repo
         if: success()
+        continue-on-error: true
         env:
           PAT: ${{ secrets.MAPS_REPO_PAT }}
+          REPO_NAME: ${{ secrets.MAPS_REPO_NAME }}
         shell: pwsh
         run: |
           $serverId = "${{ github.event.inputs.server_id }}"
@@ -644,8 +646,8 @@ jobs:
           git config --global user.name "Github Action"
           git config --global user.email "action@github.com"
           
-          # Клонируем репозиторий Maps во временную папку
-          git clone https://x-access-token:$($env:PAT)@github.com/bobibackend/Maps.git temp_maps_repo
+          # Клонируем приватный репозиторий во временную папку
+          git clone https://x-access-token:$($env:PAT)@github.com/$($env:REPO_NAME).git temp_maps_repo
           
           # Создаем структуру папок (сервер_id)
           $destFolder = "temp_maps_repo/$serverId"
@@ -659,12 +661,12 @@ jobs:
           # Фиксируем изменения и пушим в ветку main
           cd temp_maps_repo
           git add .
-          git commit -m "Add/Update map zip for server $serverId: $mapName"
+          git commit -m "Add/Update map zip for server $serverId"
           git push origin main
           
           cd ..
           Remove-Item -Recurse -Force temp_maps_repo
-          Write-Host "✅ ZIP successfully pushed to bobibackend/Maps!"
+          Write-Host "✅ ZIP successfully pushed!"
 
       - name: 📝 Create summary
         if: success()
