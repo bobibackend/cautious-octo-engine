@@ -626,18 +626,45 @@ jobs:
               Write-Host "   This is not critical - mapFiles are saved in server object"
             }
           }
-
-      - name: 📤 Upload map artifacts (backup)
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-map-${{ github.run_number }}
-          path: |
-            maps/output.png
-            maps/output_no_labels.png
-            maps/MapLabels.json
-            maps/LootSpawns.json
-          retention-days: 7
-          if-no-files-found: warn
+      - name: 📦 Create ZIP Archive and Push to Private Repo
+        if: success()
+        env:
+          PAT: ${{ secrets.MAPS_REPO_PAT }}
+        shell: pwsh
+        run: |
+          $serverId = "${{ github.event.inputs.server_id }}"
+          $mapName = "${{ github.event.inputs.map_name }}"
+          $sanitizedMapName = $mapName -replace '[\\/:*?"<>|]', '_'
+          
+          Write-Host "📦 Creating ZIP archive..."
+          $zipPath = "maps/${sanitizedMapName}.zip"
+          Compress-Archive -Path maps/output.png, maps/output_no_labels.png, maps/MapLabels.json, maps/LootSpawns.json -DestinationPath $zipPath -Force
+          
+          Write-Host "🌐 Cloning destination repository..."
+          git config --global user.name "Github Action"
+          git config --global user.email "action@github.com"
+          
+          # Клонируем репозиторий Maps во временную папку
+          git clone https://x-access-token:$($env:PAT)@github.com/bobibackend/Maps.git temp_maps_repo
+          
+          # Создаем структуру папок (сервер_id)
+          $destFolder = "temp_maps_repo/$serverId"
+          if (-not (Test-Path $destFolder)) {
+            New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
+          }
+          
+          # Копируем архив в нужную папку
+          Copy-Item $zipPath "$destFolder/" -Force
+          
+          # Фиксируем изменения и пушим в ветку main
+          cd temp_maps_repo
+          git add .
+          git commit -m "Add/Update map zip for server $serverId: $mapName"
+          git push origin main
+          
+          cd ..
+          Remove-Item -Recurse -Force temp_maps_repo
+          Write-Host "✅ ZIP successfully pushed to bobibackend/Maps!"
 
       - name: 📝 Create summary
         if: success()
