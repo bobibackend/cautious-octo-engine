@@ -101,20 +101,27 @@ namespace Oxide.Plugins
                 var go = t.gameObject;
                 var lowerName = go.name.ToLower();
                 
-                // Для дебага выведем уникальные названия объектов, содержащих "spawn" (кроме лута и животных), 
-                // чтобы мы могли увидеть, как RustEdit называет точки спавна на кастомной карте
-                if (lowerName.Contains("spawn") && !lowerName.Contains("loot") && !lowerName.Contains("npc") 
-                    && !lowerName.Contains("animal") && !lowerName.Contains("junkpile") && !lowerName.Contains("corpse"))
+                bool isPlayerSpawn = false;
+                
+                // 1. Проверяем точный путь оригинального префаба
+                if (lowerName.Contains("autospawn/spawn_point.prefab") || lowerName.Contains("spawngroup_player"))
                 {
-                    if (loggedNames.Add(lowerName))
-                    {
-                        Puts($"[Spawn Debug] Found spawn object: {lowerName}");
-                    }
+                    isPlayerSpawn = true;
+                }
+                // 2. На кастомных картах Unity часто переименовывает объекты (например, "SpawnPoint", "SpawnPoint (1)")
+                // Проверяем, начинается ли название с этих слов, чтобы отсечь "road_spawn_point" и "junkpile_spawn_point"
+                else if (lowerName.StartsWith("spawn_point") || lowerName.StartsWith("spawnpoint") || lowerName.StartsWith("playerspawn"))
+                {
+                    isPlayerSpawn = true;
                 }
                 
-                if (lowerName.Contains("spawn_point") || lowerName.Contains("spawngroup_player") || 
-                    lowerName.Contains("playerspawn") || lowerName.Contains("spawnpoint") || 
-                    lowerName.Contains("autospawn/spawn"))
+                // Отсекаем мусор, если он случайно совпал
+                if (isPlayerSpawn && (lowerName.Contains("vehicle") || lowerName.Contains("animal") || lowerName.Contains("loot") || lowerName.Contains("corpse") || lowerName.Contains("junkpile")))
+                {
+                    isPlayerSpawn = false;
+                }
+
+                if (isPlayerSpawn)
                 {
                     spawns.Add(new LootSpawn 
                     { 
