@@ -93,12 +93,28 @@ namespace Oxide.Plugins
             var playerSpawnsFound = 0;
             var allTransforms = UnityEngine.Object.FindObjectsOfType<Transform>();
             
+            var loggedNames = new HashSet<string>();
+            
             foreach (var t in allTransforms)
             {
                 if (t == null || t.gameObject == null || !t.gameObject.activeInHierarchy) continue;
                 var go = t.gameObject;
+                var lowerName = go.name.ToLower();
                 
-                if (go.name.Contains("spawn_point") || go.name.Contains("spawngroup_player"))
+                // Для дебага выведем уникальные названия объектов, содержащих "spawn" (кроме лута и животных), 
+                // чтобы мы могли увидеть, как RustEdit называет точки спавна на кастомной карте
+                if (lowerName.Contains("spawn") && !lowerName.Contains("loot") && !lowerName.Contains("npc") 
+                    && !lowerName.Contains("animal") && !lowerName.Contains("junkpile") && !lowerName.Contains("corpse"))
+                {
+                    if (loggedNames.Add(lowerName))
+                    {
+                        Puts($"[Spawn Debug] Found spawn object: {lowerName}");
+                    }
+                }
+                
+                if (lowerName.Contains("spawn_point") || lowerName.Contains("spawngroup_player") || 
+                    lowerName.Contains("playerspawn") || lowerName.Contains("spawnpoint") || 
+                    lowerName.Contains("autospawn/spawn"))
                 {
                     spawns.Add(new LootSpawn 
                     { 
