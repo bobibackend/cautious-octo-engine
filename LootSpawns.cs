@@ -88,54 +88,6 @@ namespace Oxide.Plugins
                 }
             }
 
-            // Используем чистый Unity API для поиска точек спавна по названию префаба, 
-            // чтобы скрипт 100% скомпилировался независимо от того, какие классы есть в Rust.
-            var playerSpawnsFound = 0;
-            var allTransforms = UnityEngine.Object.FindObjectsOfType<Transform>();
-            
-            var loggedNames = new HashSet<string>();
-            
-            foreach (var t in allTransforms)
-            {
-                if (t == null || t.gameObject == null || !t.gameObject.activeInHierarchy) continue;
-                var go = t.gameObject;
-                var lowerName = go.name.ToLower();
-                
-                bool isPlayerSpawn = false;
-                
-                // 1. Проверяем точный путь оригинального префаба
-                if (lowerName.Contains("autospawn/spawn_point.prefab") || lowerName.Contains("spawngroup_player"))
-                {
-                    isPlayerSpawn = true;
-                }
-                // 2. На кастомных картах Unity часто переименовывает объекты (например, "SpawnPoint", "SpawnPoint (1)")
-                // Проверяем, начинается ли название с этих слов, чтобы отсечь "road_spawn_point" и "junkpile_spawn_point"
-                else if (lowerName.StartsWith("spawn_point") || lowerName.StartsWith("spawnpoint") || lowerName.StartsWith("playerspawn"))
-                {
-                    isPlayerSpawn = true;
-                }
-                
-                // Отсекаем мусор, если он случайно совпал
-                if (isPlayerSpawn && (lowerName.Contains("vehicle") || lowerName.Contains("animal") || lowerName.Contains("loot") || lowerName.Contains("corpse") || lowerName.Contains("junkpile")))
-                {
-                    isPlayerSpawn = false;
-                }
-
-                if (isPlayerSpawn)
-                {
-                    spawns.Add(new LootSpawn 
-                    { 
-                        Type = "Player Spawn", 
-                        X = go.transform.position.x, 
-                        Z = go.transform.position.z, 
-                        PrefabName = "player_spawn" 
-                    });
-                    playerSpawnsFound++;
-                }
-            }
-
-            Puts($"Found {playerSpawnsFound} player spawn points");
-
             var data = new LootSpawnsData
             {
                 WorldSize = worldSize,
