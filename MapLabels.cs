@@ -188,6 +188,7 @@ namespace Oxide.Plugins
                         if (shortName.Contains("module_") || 
                             shortName.Contains("tube_") || 
                             shortName.Contains("moonpool_") ||
+                            shortName.Contains("prevent_building") ||
                             shortName.StartsWith("train_tunnel_double_entrance"))
                             continue;
                         
