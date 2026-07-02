@@ -88,34 +88,25 @@ namespace Oxide.Plugins
                 }
             }
 
-            // Пытаемся найти спавны разными способами, так как разработчики часто меняют классы
+            // Используем чистый Unity API для поиска точек спавна по названию префаба, 
+            // чтобы скрипт 100% скомпилировался независимо от того, какие классы есть в Rust.
             var playerSpawnsFound = 0;
-
-            // Способ 1: Ищем по классическому компоненту BaseSpawnPoint
-            var oldSpawnPoints = UnityEngine.Object.FindObjectsOfType<BaseSpawnPoint>();
-            foreach (var sp in oldSpawnPoints)
+            var allTransforms = UnityEngine.Object.FindObjectsOfType<Transform>();
+            
+            foreach (var t in allTransforms)
             {
-                if (sp == null || !sp.gameObject.name.Contains("spawn_point")) continue;
-                spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
-                playerSpawnsFound++;
-            }
-
-            // Способ 2: Ищем по новому компоненту SpawnPointInstance
-            var spawnPointInstances = UnityEngine.Object.FindObjectsOfType<SpawnPointInstance>();
-            foreach (var sp in spawnPointInstances)
-            {
-                if (sp == null) continue;
-                spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
-                playerSpawnsFound++;
-            }
-
-            // Способ 3: Поиск через TerrainMeta (самый надежный для процедурных карт)
-            if (playerSpawnsFound == 0 && TerrainMeta.Path != null && TerrainMeta.Path.SpawnPoints != null)
-            {
-                foreach (var sp in TerrainMeta.Path.SpawnPoints)
+                if (t == null || t.gameObject == null || !t.gameObject.activeInHierarchy) continue;
+                var go = t.gameObject;
+                
+                if (go.name.Contains("spawn_point") || go.name.Contains("spawngroup_player"))
                 {
-                    if (sp == null) continue;
-                    spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
+                    spawns.Add(new LootSpawn 
+                    { 
+                        Type = "Player Spawn", 
+                        X = go.transform.position.x, 
+                        Z = go.transform.position.z, 
+                        PrefabName = "player_spawn" 
+                    });
                     playerSpawnsFound++;
                 }
             }
