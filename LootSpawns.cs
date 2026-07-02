@@ -88,24 +88,39 @@ namespace Oxide.Plugins
                 }
             }
 
-            // Найти все спавны игроков через тег "spawnpoint"
-            var spawnPointObjects = GameObject.FindGameObjectsWithTag("spawnpoint");
-            Puts($"Found {spawnPointObjects.Length} player spawn points");
+            // Пытаемся найти спавны разными способами, так как разработчики часто меняют классы
+            var playerSpawnsFound = 0;
 
-            foreach (var spawnObj in spawnPointObjects)
+            // Способ 1: Ищем по классическому компоненту BaseSpawnPoint
+            var oldSpawnPoints = UnityEngine.Object.FindObjectsOfType<BaseSpawnPoint>();
+            foreach (var sp in oldSpawnPoints)
             {
-                if (spawnObj == null) continue;
-
-                var position = spawnObj.transform.position;
-                
-                spawns.Add(new LootSpawn
-                {
-                    Type = "Player Spawn",
-                    X = position.x,
-                    Z = position.z,
-                    PrefabName = "player_spawn"
-                });
+                if (sp == null || !sp.gameObject.name.Contains("spawn_point")) continue;
+                spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
+                playerSpawnsFound++;
             }
+
+            // Способ 2: Ищем по новому компоненту SpawnPointInstance
+            var spawnPointInstances = UnityEngine.Object.FindObjectsOfType<SpawnPointInstance>();
+            foreach (var sp in spawnPointInstances)
+            {
+                if (sp == null) continue;
+                spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
+                playerSpawnsFound++;
+            }
+
+            // Способ 3: Поиск через TerrainMeta (самый надежный для процедурных карт)
+            if (playerSpawnsFound == 0 && TerrainMeta.Path != null && TerrainMeta.Path.SpawnPoints != null)
+            {
+                foreach (var sp in TerrainMeta.Path.SpawnPoints)
+                {
+                    if (sp == null) continue;
+                    spawns.Add(new LootSpawn { Type = "Player Spawn", X = sp.transform.position.x, Z = sp.transform.position.z, PrefabName = "player_spawn" });
+                    playerSpawnsFound++;
+                }
+            }
+
+            Puts($"Found {playerSpawnsFound} player spawn points");
 
             var data = new LootSpawnsData
             {
