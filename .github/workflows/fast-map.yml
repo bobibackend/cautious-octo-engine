@@ -2,8 +2,6 @@ name: Fast map render (no Rust server)
 
 # Быстрая картинка карты сразу после вайпа: рендер .map напрямую на Python
 # (повторяет алгоритм world.rendermap), без запуска RustDedicated.
-# Лут — только тот, что лежит в самом .map (ящики/бочки/руда из RustEdit) + точки спавна игроков → LootSpawns.json.
-# Лут внутри стандартных монументов по-прежнему даёт полный main.yml, который запускается параллельно.
 
 on:
   workflow_dispatch:
@@ -50,9 +48,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            map-render/fastmap
-            map-render/plugins/MapLabels.cs
-            map-render/assets/fonts/permanent-marker-v16-latin-regular.ttf
+            fastmap
+            plugins/MapLabels.cs
+            assets/fonts/permanent-marker-v16-latin-regular.ttf
           sparse-checkout-cone-mode: false
 
       - name: Validate inputs
@@ -72,10 +70,10 @@ jobs:
         with:
           python-version: '3.13'
           cache: pip
-          cache-dependency-path: map-render/fastmap/requirements.txt
+          cache-dependency-path: fastmap/requirements.txt
 
       - name: Install dependencies
-        run: pip install -r map-render/fastmap/requirements.txt
+        run: pip install -r fastmap/requirements.txt
 
       - name: Download map
         run: |
@@ -87,15 +85,14 @@ jobs:
       - name: Render
         run: |
           set -euo pipefail
-          cs=map-render/plugins/MapLabels.cs
-          font=map-render/assets/fonts/permanent-marker-v16-latin-regular.ttf
+          cs=plugins/MapLabels.cs
+          font=assets/fonts/permanent-marker-v16-latin-regular.ttf
           [[ -f "$font" ]] || { echo "::error::$font not found"; exit 1; }
           [[ -f "$cs" ]] || { echo "::error::$cs not found"; exit 1; }
           echo "font: $font, labels: $cs"
-          python map-render/fastmap/fastmap.py work/map.map out --labels-cs "$cs" --font "$font"
+          python fastmap/fastmap.py work/map.map out --labels-cs "$cs" --font "$font"
           ls -la out
 
-      # Временное хранилище GitHub: файлы лежат на странице запуска → Artifacts (7 дней).
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -133,7 +130,6 @@ jobs:
           echo "uploaded=true" >> "$GITHUB_OUTPUT"
 
       - name: Update Firebase
-        # без R2 у Firebase не будет рабочих ссылок — пропускаем
         if: steps.r2.outputs.uploaded == 'true'
         env:
           FIREBASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
@@ -150,7 +146,6 @@ jobs:
             mapLabels: "\($b)/MapLabels.json", lootSpawns: "\($b)/LootSpawns.json", quality: "fast", timestamp: $ts, renderedAt: (now * 1000 | floor)}')
           q="auth=$FIREBASE_SECRET"
 
-          # Не воскрешаем удалённый сервер и не перетираем более новый вайп.
           current=$(curl -fsS "$db/servers/$SERVER_ID/lastSnapshotTimestamp.json?$q")
           if [[ "$current" == "null" ]]; then
             echo "Server $SERVER_ID not found, skipping"; exit 0
