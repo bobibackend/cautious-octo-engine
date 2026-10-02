@@ -27,11 +27,27 @@ on:
 jobs:
   generate-map:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
+
+      # Rust Dedicated Server на больших кастомных картах не влезает в RAM раннера —
+      # увеличиваем файл подкачки, иначе падает с "Out of memory".
+      - name: 💾 Increase pagefile (virtual memory)
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 32GB
+          disk-root: "C:"
+
+      - name: 🧠 Show memory
+        shell: pwsh
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("RAM: {0:N1} GB" -f ($os.TotalVisibleMemorySize / 1MB))
+          Get-CimInstance Win32_PageFileUsage | Format-Table Name, AllocatedBaseSize
 
       - name: 🔍 Debug - Show environment
         shell: pwsh
@@ -237,7 +253,7 @@ jobs:
         shell: pwsh
         continue-on-error: true
         id: render_map
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           Write-Host "========================================="
           Write-Host "STEP: Generate map image with labels"
@@ -263,7 +279,7 @@ jobs:
           
           # Ждём завершения сервера (плагин сам вызовет quit после рендера)
           Write-Host "⏳ Waiting for server to load map, render, overlay labels, and quit..."
-          $timeout = 1200  # 20 минут максимум
+          $timeout = 1740  # 29 минут максимум (с подкачкой рендер медленнее)
           $elapsed = 0
           
           while ($elapsed -lt $timeout -and -not $serverProcess.HasExited) {
