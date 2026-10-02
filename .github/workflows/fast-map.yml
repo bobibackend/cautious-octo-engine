@@ -1,0 +1,189 @@
+name: Fast map render (no Rust server)
+
+# Быстрая картинка карты сразу после вайпа: рендер .map напрямую на Python
+# (повторяет алгоритм world.rendermap), без запуска RustDedicated.
+# Лут — только тот, что лежит в самом .map (ящики/бочки/руда из RustEdit) + точки спавна игроков → LootSpawns.json.
+# Лут внутри стандартных монументов по-прежнему даёт полный main.yml, который запускается параллельно.
+
+on:
+  workflow_dispatch:
+    inputs:
+      map_url:
+        description: 'URL к .map файлу (копия в R2)'
+        required: true
+      map_name:
+        description: 'Имя карты (без расширения)'
+        required: false
+        default: 'Procedural Map'
+      server_id:
+        description: 'ID сервера для путей R2 и Firebase'
+        required: false
+        default: 'test_server'
+      timestamp:
+        description: 'Timestamp снимка'
+        required: false
+        default: '0000000000000'
+      snapshot_id:
+        description: 'Firebase snapshot key'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fast-map-${{ github.event.inputs.server_id }}
+  cancel-in-progress: true
+
+jobs:
+  fast-map:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MAP_URL: ${{ github.event.inputs.map_url }}
+      SERVER_ID: ${{ github.event.inputs.server_id }}
+      TS: ${{ github.event.inputs.timestamp }}
+      SNAPSHOT_ID: ${{ github.event.inputs.snapshot_id }}
+      R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            map-render/fastmap
+            map-render/plugins/MapLabels.cs
+            map-render/assets/fonts/permanent-marker-v16-latin-regular.ttf
+          sparse-checkout-cone-mode: false
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ "$SERVER_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "::error::bad server_id"; exit 1; }
+          [[ "$TS" =~ ^[0-9]{1,16}$ ]] || { echo "::error::bad timestamp"; exit 1; }
+          [[ -z "$SNAPSHOT_ID" || "$SNAPSHOT_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "::error::bad snapshot_id"; exit 1; }
+          [[ "$MAP_URL" =~ ^https:// ]] || { echo "::error::map_url must be https"; exit 1; }
+          pub="${R2_PUBLIC_URL%/}"
+          if [[ -n "$pub" && "$MAP_URL" != "$pub/"* ]]; then
+            echo "::error::map_url must point to R2_PUBLIC_URL"; exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: map-render/fastmap/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r map-render/fastmap/requirements.txt
+
+      - name: Download map
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 --max-time 300 -o work/map.map "$MAP_URL"
+          ls -la work/map.map
+
+      - name: Render
+        run: |
+          set -euo pipefail
+          cs=map-render/plugins/MapLabels.cs
+          font=map-render/assets/fonts/permanent-marker-v16-latin-regular.ttf
+          [[ -f "$font" ]] || { echo "::error::$font not found"; exit 1; }
+          [[ -f "$cs" ]] || { echo "::error::$cs not found"; exit 1; }
+          echo "font: $font, labels: $cs"
+          python map-render/fastmap/fastmap.py work/map.map out --labels-cs "$cs" --font "$font"
+          ls -la out
+
+      # Временное хранилище GitHub: файлы лежат на странице запуска → Artifacts (7 дней).
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fast-map-${{ github.event.inputs.server_id }}-${{ github.event.inputs.timestamp }}
+          path: |
+            out/output.png
+            out/output_no_labels.png
+            out/MapLabels.json
+            out/LootSpawns.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload to R2
+        id: r2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || -z "${R2_ENDPOINT:-}" || -z "${R2_PUBLIC_URL:-}" ]]; then
+            echo "::warning::R2 secrets are not configured — files are only in the workflow artifact"
+            echo "uploaded=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          prefix="maps/rendered/$SERVER_ID/$TS/fast"
+          dest="s3://${R2_BUCKET:+$R2_BUCKET/}$prefix"
+          for f in output.png output_no_labels.png MapLabels.json LootSpawns.json; do
+            type=image/png; [[ "$f" == *.json ]] && type=application/json
+            aws s3 cp "out/$f" "$dest/$f" --endpoint-url "$R2_ENDPOINT" --content-type "$type" --only-show-errors
+            echo "uploaded $f"
+          done
+          echo "uploaded=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update Firebase
+        # без R2 у Firebase не будет рабочих ссылок — пропускаем
+        if: steps.r2.outputs.uploaded == 'true'
+        env:
+          FIREBASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+          FIREBASE_SECRET: ${{ secrets.FIREBASE_SECRET }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FIREBASE_URL:-}" || -z "${FIREBASE_SECRET:-}" ]]; then
+            echo "::warning::Firebase secrets are not configured, skipping"; exit 0
+          fi
+          db="${FIREBASE_URL%/}"
+          base="${R2_PUBLIC_URL%/}/maps/rendered/$SERVER_ID/$TS/fast"
+          payload=$(jq -n --arg b "$base" --argjson ts "$TS" '{
+            imageWithLabels: "\($b)/output.png", imageNoLabels: "\($b)/output_no_labels.png",
+            mapLabels: "\($b)/MapLabels.json", lootSpawns: "\($b)/LootSpawns.json", quality: "fast", timestamp: $ts, renderedAt: (now * 1000 | floor)}')
+          q="auth=$FIREBASE_SECRET"
+
+          # Не воскрешаем удалённый сервер и не перетираем более новый вайп.
+          current=$(curl -fsS "$db/servers/$SERVER_ID/lastSnapshotTimestamp.json?$q")
+          if [[ "$current" == "null" ]]; then
+            echo "Server $SERVER_ID not found, skipping"; exit 0
+          fi
+          if [[ "$current" =~ ^[0-9]+$ && "$current" -gt "$TS" ]]; then
+            echo "Server already moved to a newer wipe ($current > $TS), updating history only"
+          else
+            curl -fsS -X PUT -H 'Content-Type: application/json' -d "$payload" \
+              "$db/servers/$SERVER_ID/fastMapFiles.json?$q" > /dev/null
+            echo "servers/$SERVER_ID/fastMapFiles updated"
+          fi
+          if [[ -n "$SNAPSHOT_ID" ]]; then
+            exists=$(curl -fsS "$db/servers/$SERVER_ID/history/$SNAPSHOT_ID/timestamp.json?$q")
+            if [[ "$exists" != "null" ]]; then
+              curl -fsS -X PUT -H 'Content-Type: application/json' -d "$payload" \
+                "$db/servers/$SERVER_ID/history/$SNAPSHOT_ID/fastMapFiles.json?$q" > /dev/null
+              echo "history/$SNAPSHOT_ID/fastMapFiles updated"
+            fi
+          fi
+
+      - name: Summary
+        if: success()
+        env:
+          R2_UPLOADED: ${{ steps.r2.outputs.uploaded }}
+        run: |
+          {
+            echo "## ⚡ Fast map render"
+            echo "- Server: \`$SERVER_ID\`, timestamp: \`$TS\`"
+            echo "- Файлы: **Artifacts** внизу этой страницы (хранятся 7 дней)"
+            if [[ "$R2_UPLOADED" == "true" ]]; then
+              base="${R2_PUBLIC_URL%/}/maps/rendered/$SERVER_ID/$TS/fast"
+              echo "- R2: [output.png]($base/output.png) · [output_no_labels.png]($base/output_no_labels.png) · [MapLabels.json]($base/MapLabels.json) · [LootSpawns.json]($base/LootSpawns.json)"
+            else
+              echo "- R2 и Firebase пропущены: секреты не заданы"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
