@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 10
     env:
       MAP_URL: ${{ github.event.inputs.map_url }}
+      MAP_NAME: ${{ github.event.inputs.map_name }}
       SERVER_ID: ${{ github.event.inputs.server_id }}
       TS: ${{ github.event.inputs.timestamp }}
       SNAPSHOT_ID: ${{ github.event.inputs.snapshot_id }}
@@ -89,22 +90,11 @@ jobs:
           font=assets/fonts/permanent-marker-v16-latin-regular.ttf
           [[ -f "$font" ]] || { echo "::error::$font not found"; exit 1; }
           [[ -f "$cs" ]] || { echo "::error::$cs not found"; exit 1; }
-          echo "font: $font, labels: $cs"
           python fastmap/fastmap.py work/map.map out --labels-cs "$cs" --font "$font"
+          for f in output.png output_no_labels.png MapLabels.json LootSpawns.json; do
+            [[ -f "out/$f" ]] || { echo "::error::out/$f was not produced"; exit 1; }
+          done
           ls -la out
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: fast-map-${{ github.event.inputs.server_id }}-${{ github.event.inputs.timestamp }}
-          path: |
-            out/output.png
-            out/output_no_labels.png
-            out/MapLabels.json
-            out/LootSpawns.json
-          retention-days: 7
-          compression-level: 0
-          if-no-files-found: error
 
       - name: Upload to R2
         id: r2
@@ -117,7 +107,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || -z "${R2_ENDPOINT:-}" || -z "${R2_PUBLIC_URL:-}" ]]; then
-            echo "::warning::R2 secrets are not configured — files are only in the workflow artifact"
+            echo "::warning::R2 secrets are not configured — skipping R2 upload"
             echo "uploaded=false" >> "$GITHUB_OUTPUT"; exit 0
           fi
           prefix="maps/rendered/$SERVER_ID/$TS/fast"
@@ -166,19 +156,67 @@ jobs:
             fi
           fi
 
+      # Бэкап в скрытый репо (как в main.yml), но в отдельную папку fast/<server_id>/
+      - name: Push ZIP to private backup repo
+        id: backup
+        continue-on-error: true
+        env:
+          PAT: ${{ secrets.MAPS_REPO_PAT }}
+          REPO_NAME: ${{ secrets.MAPS_REPO_NAME }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PAT:-}" || -z "${REPO_NAME:-}" ]]; then
+            echo "::warning::MAPS_REPO_PAT / MAPS_REPO_NAME not set — skipping backup"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          name=$(printf '%s' "$MAP_NAME" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^[._-]*//' | cut -c1-100)
+          [[ -n "$name" ]] || name="$SERVER_ID"
+          zip_name="${name}_${TS}.zip"
+          (cd out && zip -q -9 "../$zip_name" output.png output_no_labels.png MapLabels.json LootSpawns.json)
+
+          git config --global user.name "Github Action"
+          git config --global user.email "action@github.com"
+          git clone --depth 1 "https://x-access-token:${PAT}@github.com/${REPO_NAME}.git" backup_repo
+          dest="backup_repo/fast/$SERVER_ID"
+          mkdir -p "$dest"
+          cp "$zip_name" "$dest/"
+
+          cd backup_repo
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"; echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          git commit -q -m "Fast map zip for server $SERVER_ID ($TS)"
+          # полный рендер может пушить параллельно — пробуем несколько раз с rebase
+          for i in 1 2 3 4 5; do
+            if git push -q origin HEAD; then
+              echo "✅ Pushed fast/$SERVER_ID/$zip_name"
+              echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "push rejected, retry $i..."
+            sleep $((i * 3))
+            git pull -q --rebase origin HEAD
+          done
+          echo "::error::Failed to push backup"; exit 1
+
       - name: Summary
         if: success()
         env:
           R2_UPLOADED: ${{ steps.r2.outputs.uploaded }}
+          BACKUP: ${{ steps.backup.outputs.pushed }}
         run: |
           {
             echo "## ⚡ Fast map render"
             echo "- Server: \`$SERVER_ID\`, timestamp: \`$TS\`"
-            echo "- Файлы: **Artifacts** внизу этой страницы (хранятся 7 дней)"
             if [[ "$R2_UPLOADED" == "true" ]]; then
               base="${R2_PUBLIC_URL%/}/maps/rendered/$SERVER_ID/$TS/fast"
               echo "- R2: [output.png]($base/output.png) · [output_no_labels.png]($base/output_no_labels.png) · [MapLabels.json]($base/MapLabels.json) · [LootSpawns.json]($base/LootSpawns.json)"
             else
               echo "- R2 и Firebase пропущены: секреты не заданы"
+            fi
+            if [[ "$BACKUP" == "true" ]]; then
+              echo "- Бэкап: \`fast/$SERVER_ID/\` в приватном репо"
+            else
+              echo "- Бэкап не сделан (см. лог шага Push ZIP)"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
