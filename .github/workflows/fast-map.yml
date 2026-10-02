@@ -1,222 +1,721 @@
-name: Fast map render (no Rust server)
-
-# Быстрая картинка карты сразу после вайпа: рендер .map напрямую на Python
-# (повторяет алгоритм world.rendermap), без запуска RustDedicated.
+name: Generate Rust Map (Rust Server)
 
 on:
   workflow_dispatch:
     inputs:
       map_url:
-        description: 'URL к .map файлу (копия в R2)'
+        description: 'URL к .map файлу'
         required: true
+        default: 'https://github.com/RustEditLaun/glowing-potato/blob/main/.github/workflows/main.yml'
       map_name:
         description: 'Имя карты (без расширения)'
         required: false
         default: 'Procedural Map'
       server_id:
-        description: 'ID сервера для путей R2 и Firebase'
+        description: 'ID сервера для путей S3 и Firebase'
         required: false
         default: 'test_server'
       timestamp:
-        description: 'Timestamp снимка'
+        description: 'Timestamp для уникальности путей'
         required: false
         default: '0000000000000'
       snapshot_id:
-        description: 'Firebase snapshot key'
+        description: 'Firebase snapshot key для прямого обновления истории'
         required: false
         default: ''
 
-permissions:
-  contents: read
-
-concurrency:
-  group: fast-map-${{ github.event.inputs.server_id }}
-  cancel-in-progress: true
-
 jobs:
-  fast-map:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      MAP_URL: ${{ github.event.inputs.map_url }}
-      MAP_NAME: ${{ github.event.inputs.map_name }}
-      SERVER_ID: ${{ github.event.inputs.server_id }}
-      TS: ${{ github.event.inputs.timestamp }}
-      SNAPSHOT_ID: ${{ github.event.inputs.snapshot_id }}
-      R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+  generate-map:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    
     steps:
-      - name: Checkout
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
+
+      # Rust Dedicated Server на больших кастомных картах не влезает в RAM раннера —
+      # увеличиваем файл подкачки, иначе падает с "Out of memory".
+      - name: 💾 Increase pagefile (virtual memory)
+        uses: al-cheb/configure-pagefile-action@v1.4
         with:
-          sparse-checkout: |
-            fastmap
-            plugins/MapLabels.cs
-            assets/fonts/permanent-marker-v16-latin-regular.ttf
-          sparse-checkout-cone-mode: false
+          minimum-size: 16GB
+          maximum-size: 32GB
+          disk-root: "C:"
 
-      - name: Validate inputs
+      - name: 🧠 Show memory
+        shell: pwsh
         run: |
-          set -euo pipefail
-          [[ "$SERVER_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "::error::bad server_id"; exit 1; }
-          [[ "$TS" =~ ^[0-9]{1,16}$ ]] || { echo "::error::bad timestamp"; exit 1; }
-          [[ -z "$SNAPSHOT_ID" || "$SNAPSHOT_ID" =~ ^[A-Za-z0-9_-]{1,128}$ ]] || { echo "::error::bad snapshot_id"; exit 1; }
-          [[ "$MAP_URL" =~ ^https:// ]] || { echo "::error::map_url must be https"; exit 1; }
-          pub="${R2_PUBLIC_URL%/}"
-          if [[ -n "$pub" && "$MAP_URL" != "$pub/"* ]]; then
-            echo "::error::map_url must point to R2_PUBLIC_URL"; exit 1
-          fi
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host ("RAM: {0:N1} GB" -f ($os.TotalVisibleMemorySize / 1MB))
+          Get-CimInstance Win32_PageFileUsage | Format-Table Name, AllocatedBaseSize
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-          cache: pip
-          cache-dependency-path: fastmap/requirements.txt
-
-      - name: Install dependencies
-        run: pip install -r fastmap/requirements.txt
-
-      - name: Download map
+      - name: 🔍 Debug - Show environment
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir -p work
-          curl -fL --retry 5 --retry-all-errors --retry-delay 3 --max-time 300 -o work/map.map "$MAP_URL"
-          ls -la work/map.map
+          Write-Host "=== Environment Info ==="
+          Write-Host "Working Directory: $(Get-Location)"
+          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
+          Write-Host ""
+          Write-Host "=== Inputs ==="
+          Write-Host "Map Name: ${{ github.event.inputs.map_name }}"
+          Write-Host ""
 
-      - name: Render
+      - name: 📦 Download map file
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cs=plugins/MapLabels.cs
-          font=assets/fonts/permanent-marker-v16-latin-regular.ttf
-          [[ -f "$font" ]] || { echo "::error::$font not found"; exit 1; }
-          [[ -f "$cs" ]] || { echo "::error::$cs not found"; exit 1; }
-          python fastmap/fastmap.py work/map.map out --labels-cs "$cs" --font "$font"
-          for f in output.png output_no_labels.png MapLabels.json LootSpawns.json; do
-            [[ -f "out/$f" ]] || { echo "::error::out/$f was not produced"; exit 1; }
-          done
-          ls -la out
+          $ErrorActionPreference = "Continue"
+          Write-Host "📥 Downloading map file..."
+          New-Item -ItemType Directory -Force -Path "maps" | Out-Null
+          
+          $mapUrl = "${{ github.event.inputs.map_url }}"
+          $mapName = "${{ github.event.inputs.map_name }}"
+          $mapFile = "maps\$mapName.map"
+          
+          Write-Host "Target: $mapFile"
+          Write-Host ""
+          
+          try {
+            Invoke-WebRequest -Uri $mapUrl -OutFile $mapFile -ErrorAction Stop
+            Write-Host "✅ Map downloaded"
+          } catch {
+            Write-Host "❌ Download failed: $($_.Exception.Message)"
+            Write-Host ""
+            Write-Host "Trying with curl..."
+            & curl -L -o $mapFile $mapUrl 2>&1 | Out-Null
+          }
+          
+          Write-Host ""
+          if (Test-Path $mapFile) {
+            $fileInfo = Get-Item $mapFile
+            Write-Host "✅ File exists"
+            Write-Host "   Size: $([math]::Round($fileInfo.Length / 1MB, 2)) MB"
+            Write-Host "   Path: $($fileInfo.FullName)"
+          } else {
+            Write-Host "❌ File not found after download!"
+            exit 1
+          }
+          
+          Write-Host ""
+          Write-Host "Maps directory:"
+          Get-ChildItem maps\ -ErrorAction SilentlyContinue | Format-Table Name, Length
+          
+          # Явно завершаем успешно
+          exit 0
 
-      - name: Upload to R2
-        id: r2
+      - name: 🎮 Download Rust Dedicated Server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "SilentlyContinue"
+          Write-Host "📥 Downloading Rust Dedicated Server..."
+          
+          # Скачиваем SteamCMD
+          Invoke-WebRequest -Uri "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip" -OutFile "steamcmd.zip"
+          Expand-Archive -Path "steamcmd.zip" -DestinationPath "steamcmd" -Force
+          
+          Write-Host "📦 Installing Rust Dedicated Server..."
+          
+          # Устанавливаем Rust Server через SteamCMD
+          $null = & .\steamcmd\steamcmd.exe +force_install_dir "..\rust_server" +login anonymous +app_update 258550 validate +quit 2>&1
+          
+          Write-Host "✅ Rust Server installed"
+          Write-Host ""
+          
+          # Проверяем что RustDedicated.exe существует
+          if (Test-Path "rust_server\RustDedicated.exe") {
+            Write-Host "✅ RustDedicated.exe found!"
+            $exeInfo = Get-Item "rust_server\RustDedicated.exe"
+            Write-Host "   Size: $([math]::Round($exeInfo.Length / 1MB, 2)) MB"
+          } else {
+            Write-Host "❌ ERROR: RustDedicated.exe not found!"
+            exit 1
+          }
+          
+          Write-Host ""
+          Write-Host "✅ Step completed successfully"
+          $LASTEXITCODE = 0
+
+      - name: 🗺️ Setup server for map rendering
+        shell: pwsh
+        run: |
+          Write-Host "========================================="
+          Write-Host "STEP: Setup server for map rendering"
+          Write-Host "========================================="
+          Write-Host ""
+          
+          $ErrorActionPreference = "Continue"
+          Write-Host "🔧 Setting up server configuration..."
+          Write-Host ""
+          
+          # Проверяем что сервер скачался
+          Write-Host "Checking Rust Server..."
+          if (-not (Test-Path "rust_server\RustDedicated.exe")) {
+            Write-Host "❌ ERROR: RustDedicated.exe not found!"
+            Get-ChildItem rust_server\ -ErrorAction SilentlyContinue | Format-Table Name
+            exit 1
+          }
+          Write-Host "✅ RustDedicated.exe found"
+          Write-Host ""
+          
+          # Проверяем что карта скачалась
+          Write-Host "Checking map file..."
+          $mapFile = "maps\${{ github.event.inputs.map_name }}.map"
+          if (-not (Test-Path $mapFile)) {
+            Write-Host "❌ ERROR: Map file not found: $mapFile"
+            Write-Host ""
+            Write-Host "Maps directory:"
+            Get-ChildItem maps\ -ErrorAction SilentlyContinue | Format-Table Name, Length
+            exit 1
+          }
+          Write-Host "✅ Map file found: $mapFile"
+          Write-Host ""
+          
+          # Создаем папку для сервера (БЕЗ server.cfg)
+          $serverPath = "rust_server\server\my_server_identity"
+          Write-Host "Creating server directory: $serverPath"
+          New-Item -ItemType Directory -Force -Path $serverPath | Out-Null
+          Write-Host "✅ Directory created (no server.cfg - using LEVEL_URL)"
+          Write-Host ""
+          
+          Write-Host "✅ Server configured successfully"
+          Write-Host ""
+          Write-Host "Server directory contents:"
+          Get-ChildItem $serverPath -Recurse -ErrorAction SilentlyContinue | Format-Table Name, Length, FullName
+          
+          # Убеждаемся что шаг завершился успешно
+          exit 0
+
+      - name: 🔧 Install Oxide (uMod)
+        shell: pwsh
+        run: |
+          Write-Host "📦 Downloading Oxide/uMod for Rust..."
+          
+          $oxideUrl = "https://umod.org/games/rust/download"
+          $oxideZip = "Oxide.Rust.zip"
+          
+          try {
+            Invoke-WebRequest -Uri $oxideUrl -OutFile $oxideZip -ErrorAction Stop
+            Write-Host "✅ Oxide downloaded"
+          } catch {
+            Write-Host "⚠️ Invoke-WebRequest failed, trying curl..."
+            & curl -L -o $oxideZip $oxideUrl 2>&1 | Out-Null
+          }
+          
+          if (Test-Path $oxideZip) {
+            $zipInfo = Get-Item $oxideZip
+            Write-Host "   Size: $([math]::Round($zipInfo.Length / 1MB, 2)) MB"
+            
+            # Распаковываем поверх сервера
+            Expand-Archive -Path $oxideZip -DestinationPath "rust_server" -Force
+            Write-Host "✅ Oxide installed to rust_server/"
+            
+            # Проверяем
+            if (Test-Path "rust_server\RustDedicated_Data\Managed\Oxide.Core.dll") {
+              Write-Host "✅ Oxide.Core.dll found!"
+            } else {
+              Write-Host "⚠️ Oxide.Core.dll not found, checking structure..."
+              Get-ChildItem "rust_server" -Filter "Oxide*" -Recurse | Select-Object -First 10 | Format-Table FullName
+            }
+          } else {
+            Write-Host "❌ Failed to download Oxide!"
+            exit 1
+          }
+
+      - name: 🧩 Install RustEdit Extension
+        shell: pwsh
+        run: |
+          Write-Host "🌐 Downloading RustEdit Extension..."
+          $dest = "rust_server\RustDedicated_Data\Managed\Oxide.Ext.RustEdit.dll"
+          # Используем прямую ссылку с GitHub k1lly0u
+          Invoke-WebRequest -Uri "https://github.com/k1lly0u/Oxide.Ext.RustEdit/raw/master/Oxide.Ext.RustEdit.dll" -OutFile $dest
+          if (Test-Path $dest) {
+            Write-Host "✅ RustEdit Extension installed to $dest"
+          } else {
+            Write-Host "❌ Failed to download RustEdit Extension!"
+            exit 1
+          }
+
+      - name: 📋 Copy plugins
+        shell: pwsh
+        run: |
+          Write-Host "📋 Copying plugins..."
+          
+          $pluginDir = "rust_server\oxide\plugins"
+          New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
+          
+          Copy-Item "plugins\MonumentFinder.cs" "$pluginDir\MonumentFinder.cs" -Force
+          Copy-Item "plugins\MapLabels.cs" "$pluginDir\MapLabels.cs" -Force
+          Copy-Item "plugins\LootSpawns.cs" "$pluginDir\LootSpawns.cs" -Force
+          
+          Write-Host "✅ Plugins copied to $pluginDir"
+          Get-ChildItem $pluginDir | Format-Table Name, Length
+
+      - name: 🎨 Generate map image with labels
+        shell: pwsh
+        continue-on-error: true
+        id: render_map
+        timeout-minutes: 30
+        run: |
+          Write-Host "========================================="
+          Write-Host "STEP: Generate map image with labels"
+          Write-Host "========================================="
+          Write-Host ""
+          
+          $mapUrl = "${{ github.event.inputs.map_url }}"
+          $logFile = "rust_server\server_output.log"
+          
+          Write-Host ""
+          
+          # Запускаем сервер с Oxide — плагин сам вызовет rendermap, наложит подписи и вызовет quit
+          Write-Host "🚀 Starting Rust Server with Oxide + MapLabels plugin..."
+          $serverProcess = Start-Process -FilePath "rust_server\RustDedicated.exe" `
+            -ArgumentList "-batchmode -nographics +server.hostname `"Map Renderer`" +server.port 28015 +server.maxplayers 1 +server.identity my_server_identity +server.seed 1 +server.worldsize 4500 +server.levelurl `"$mapUrl`"" `
+            -WorkingDirectory "rust_server" `
+            -RedirectStandardOutput $logFile `
+            -RedirectStandardError "rust_server\server_error.log" `
+            -PassThru -NoNewWindow
+          
+          Write-Host "Server PID: $($serverProcess.Id)"
+          Write-Host ""
+          
+          # Ждём завершения сервера (плагин сам вызовет quit после рендера)
+          Write-Host "⏳ Waiting for server to load map, render, overlay labels, and quit..."
+          $timeout = 1740  # 29 минут максимум (с подкачкой рендер медленнее)
+          $elapsed = 0
+          
+          while ($elapsed -lt $timeout -and -not $serverProcess.HasExited) {
+            Start-Sleep -Seconds 1
+            $elapsed += 1
+            
+            if (Test-Path $logFile) {
+              # Выводим каждые 30 секунд, или каждую секунду если прошло больше 400 секунд
+              if ($elapsed -ge 400 -or $elapsed % 30 -eq 0) {
+                Write-Host "[$elapsed s] Last log lines:"
+                Get-Content $logFile -ErrorAction SilentlyContinue | Select-Object -Last 3 | ForEach-Object { Write-Host "  $_" }
+                Write-Host ""
+              }
+            }
+          }
+          
+          if ($serverProcess.HasExited) {
+            Write-Host "✅ Server exited after ${elapsed}s (exit code: $($serverProcess.ExitCode))"
+          } else {
+            Write-Host "⚠️ Server did not exit within timeout, force stopping..."
+            Stop-Process -Id $serverProcess.Id -Force -ErrorAction SilentlyContinue
+          }
+          
+          # Показываем логи плагина
+          Write-Host ""
+          Write-Host "=== MapLabels plugin output ==="
+          if (Test-Path $logFile) {
+            Get-Content $logFile -ErrorAction SilentlyContinue | Select-String "MapLabels" | ForEach-Object { Write-Host $_ }
+          }
+          
+          # Показываем логи Oxide
+          Write-Host ""
+          Write-Host "=== Oxide logs ==="
+          $oxideLog = "rust_server\oxide\logs"
+          if (Test-Path $oxideLog) {
+            Get-ChildItem $oxideLog -Filter "*.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+              Write-Host "--- $($_.Name) ---"
+              Get-Content $_.FullName -ErrorAction SilentlyContinue | Select-Object -Last 20
+            }
+          }
+          
+          Write-Host ""
+          Write-Host "✅ Server process completed"
+
+      - name: 📌 Overlay labels on map image
+        shell: pwsh
+        run: |
+          $jsonPath = "rust_server\oxide\data\MapLabels.json"
+          if (-not (Test-Path $jsonPath)) {
+            Write-Host "⚠️ No labels JSON found at $jsonPath"
+            exit 0
+          }
+          
+          Write-Host "📂 Loading labels from $jsonPath..."
+          $data = Get-Content $jsonPath | ConvertFrom-Json
+          if (-not $data.Labels) {
+            Write-Host "⚠️ No labels in JSON!"
+            exit 0
+          }
+          
+          # Находим PNG
+          $mapImage = Get-ChildItem -Path "rust_server" -Filter "*.png" -Recurse | Select-Object -First 1
+          if (-not $mapImage) {
+            Write-Host "❌ No map PNG found!"
+            exit 1
+          }
+          
+          Write-Host "🎨 Drawing labels on $($mapImage.Name)..."
+          
+          # Используем GDI+ на Windows раннере
+          Add-Type -AssemblyName System.Drawing
+          
+          # Загружаем оригинал
+          $original = [System.Drawing.Image]::FromFile($mapImage.FullName)
+          $imgW = $original.Width
+          $imgH = $original.Height
+          $worldSize = $data.WorldSize
+          
+          # Сохраняем копию БЕЗ подписей в папку maps
+          New-Item -ItemType Directory -Force -Path "maps" | Out-Null
+          $noLabelsPath = "maps\output_no_labels.png"
+          $original.Save($noLabelsPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          Write-Host "✅ Saved map without labels: $noLabelsPath"
+          
+          # Создаем битмап для рисования
+          $bmp = New-Object System.Drawing.Bitmap($imgW, $imgH)
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+          $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+          
+          # Рисуем оригинал
+          $g.DrawImage($original, 0, 0, $imgW, $imgH)
+          $original.Dispose()
+          
+          # Загружаем кастомный шрифт Permanent Marker
+          $fontPath = (Resolve-Path "assets\fonts\permanent-marker-v16-latin-regular.ttf").Path
+          $fontCollection = New-Object System.Drawing.Text.PrivateFontCollection
+          $fontCollection.AddFontFile($fontPath)
+          $permanentMarkerFamily = $fontCollection.Families[0]
+          
+          # Шрифты и кисти
+          $fontSize = [math]::Max(14, $imgW / 180)
+          $font = New-Object System.Drawing.Font($permanentMarkerFamily, $fontSize, [System.Drawing.FontStyle]::Regular)
+          $brushBlack = [System.Drawing.Brushes]::Black
+          
+          $format = New-Object System.Drawing.StringFormat
+          $format.Alignment = [System.Drawing.StringAlignment]::Center
+          $format.LineAlignment = [System.Drawing.StringAlignment]::Center
+          
+          foreach ($label in $data.Labels) {
+            # Пропускаем скрытые монументы (power_sub, water_well и т.д.)
+            if ($label.HideOnMap -eq $true) {
+              continue
+            }
+            
+            # world.rendermap делает рендер 1 пиксель = 1 метр.
+            # Центр мира (0,0) всегда в центре картинки (imgW/2, imgH/2).
+            $px = $label.X + ($imgW / 2.0)
+            $py = ($imgH / 2.0) - $label.Z
+            
+            # Все подписи чёрным цветом
+            $g.DrawString($label.Name, $font, $brushBlack, $px, $py, $format)
+          }
+          
+          # Сохраняем результат С подписями
+          $outputPath = $mapImage.FullName.Replace(".png", "_labeled.png")
+          $bmp.Save($outputPath, [System.Drawing.Imaging.ImageFormat]::Png)
+          
+          # Также перезаписываем оригинал и копируем в maps
+          $bmp.Save($mapImage.FullName, [System.Drawing.Imaging.ImageFormat]::Png)
+          Copy-Item $mapImage.FullName "maps\output.png" -Force
+          
+          Write-Host "✅ Labels applied successfully"
+          Write-Host "   With labels: maps\output.png"
+          Write-Host "   Without labels: maps\output_no_labels.png"
+          
+          $g.Dispose()
+          $bmp.Dispose()
+          $font.Dispose()
+          $fontCollection.Dispose()
+
+      - name: 📤 Find and upload map image
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "🔍 Map images should already be in maps/ folder"
+          Write-Host ""
+          
+          if (Test-Path "maps\output.png") {
+            $withLabels = Get-Item "maps\output.png"
+            Write-Host "✅ Map with labels: $($withLabels.FullName)"
+            Write-Host "   Size: $($withLabels.Length / 1MB) MB"
+          } else {
+            Write-Host "❌ Map with labels not found!"
+          }
+          
+          if (Test-Path "maps\output_no_labels.png") {
+            $noLabels = Get-Item "maps\output_no_labels.png"
+            Write-Host "✅ Map without labels: $($noLabels.FullName)"
+            Write-Host "   Size: $($noLabels.Length / 1MB) MB"
+          } else {
+            Write-Host "❌ Map without labels not found!"
+          }
+
+      - name: 📤 Copy JSON files to maps folder
+        shell: pwsh
+        run: |
+          Write-Host "📋 Copying JSON files to maps folder..."
+          Copy-Item "rust_server\oxide\data\MapLabels.json" "maps\MapLabels.json" -Force -ErrorAction SilentlyContinue
+          Copy-Item "rust_server\oxide\data\LootSpawns.json" "maps\LootSpawns.json" -Force -ErrorAction SilentlyContinue
+          
+          Write-Host ""
+          Write-Host "Maps folder contents:"
+          Get-ChildItem maps\ | Format-Table Name, Length
+
+      - name: ☁️ Upload to Cloudflare R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" || -z "${R2_ENDPOINT:-}" || -z "${R2_PUBLIC_URL:-}" ]]; then
-            echo "::warning::R2 secrets are not configured — skipping R2 upload"
-            echo "uploaded=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          prefix="maps/rendered/$SERVER_ID/$TS/fast"
-          dest="s3://${R2_BUCKET:+$R2_BUCKET/}$prefix"
-          for f in output.png output_no_labels.png MapLabels.json LootSpawns.json; do
-            type=image/png; [[ "$f" == *.json ]] && type=application/json
-            aws s3 cp "out/$f" "$dest/$f" --endpoint-url "$R2_ENDPOINT" --content-type "$type" --only-show-errors
-            echo "uploaded $f"
-          done
-          echo "uploaded=true" >> "$GITHUB_OUTPUT"
+          Write-Host "☁️ Uploading files to Cloudflare R2..."
+          
+          $endpoint = $env:R2_ENDPOINT
+          $bucket = $env:R2_BUCKET
+          $server_id = "${{ github.event.inputs.server_id }}"
+          $ts = "${{ github.event.inputs.timestamp }}"
+          
+          # Если bucket пустой, используем только путь
+          # Иначе добавляем bucket в начало
+          if ([string]::IsNullOrEmpty($bucket)) {
+            $s3Path = "maps/rendered/$server_id/$ts"
+          } else {
+            $s3Path = "$bucket/maps/rendered/$server_id/$ts"
+          }
+          
+          Write-Host "Server ID: $server_id"
+          Write-Host "Timestamp: $ts"
+          Write-Host "Endpoint: $endpoint"
+          Write-Host "Bucket: $bucket"
+          Write-Host "S3 Path: $s3Path"
+          Write-Host ""
+          
+          # Проверяем наличие AWS CLI
+          try {
+            $awsVersion = aws --version
+            Write-Host "✅ AWS CLI found: $awsVersion"
+          } catch {
+            Write-Host "❌ AWS CLI not found! Installing..."
+            choco install awscli -y
+            refreshenv
+          }
+          
+          Write-Host ""
+          Write-Host "Uploading files..."
+          
+          $files = @(
+            @{local="maps/output.png"; remote="output.png"; type="image/png"},
+            @{local="maps/output_no_labels.png"; remote="output_no_labels.png"; type="image/png"},
+            @{local="maps/MapLabels.json"; remote="MapLabels.json"; type="application/json"},
+            @{local="maps/LootSpawns.json"; remote="LootSpawns.json"; type="application/json"}
+          )
+          
+          $uploadedCount = 0
+          foreach ($file in $files) {
+            if (Test-Path $file.local) {
+              Write-Host "📤 Uploading $($file.remote)..."
+              $s3Uri = "s3://$s3Path/$($file.remote)"
+              
+              Write-Host "   Target: $s3Uri"
+              
+              aws s3 cp $file.local $s3Uri --endpoint-url $endpoint --content-type $file.type
+              
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "✅ $($file.remote) uploaded"
+                $uploadedCount++
+              } else {
+                Write-Host "❌ $($file.remote) upload failed"
+              }
+            } else {
+              Write-Host "⚠️ $($file.local) not found, skipping"
+            }
+          }
+          
+          Write-Host ""
+          if ($uploadedCount -eq $files.Count) {
+            Write-Host "✅ All $uploadedCount files uploaded successfully!"
+          } else {
+            Write-Host "⚠️ Uploaded $uploadedCount out of $($files.Count) files"
+            exit 1
+          }
 
-      - name: Update Firebase
-        if: steps.r2.outputs.uploaded == 'true'
+      - name: 🔔 Update Firebase with map URLs
+        if: success()
         env:
-          FIREBASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
-          FIREBASE_SECRET: ${{ secrets.FIREBASE_SECRET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if [[ -z "${FIREBASE_URL:-}" || -z "${FIREBASE_SECRET:-}" ]]; then
-            echo "::warning::Firebase secrets are not configured, skipping"; exit 0
-          fi
-          db="${FIREBASE_URL%/}"
-          base="${R2_PUBLIC_URL%/}/maps/rendered/$SERVER_ID/$TS/fast"
-          payload=$(jq -n --arg b "$base" --argjson ts "$TS" '{
-            imageWithLabels: "\($b)/output.png", imageNoLabels: "\($b)/output_no_labels.png",
-            mapLabels: "\($b)/MapLabels.json", lootSpawns: "\($b)/LootSpawns.json", quality: "fast", timestamp: $ts, renderedAt: (now * 1000 | floor)}')
-          q="auth=$FIREBASE_SECRET"
-
-          current=$(curl -fsS "$db/servers/$SERVER_ID/lastSnapshotTimestamp.json?$q")
-          if [[ "$current" == "null" ]]; then
-            echo "Server $SERVER_ID not found, skipping"; exit 0
-          fi
-          if [[ "$current" =~ ^[0-9]+$ && "$current" -gt "$TS" ]]; then
-            echo "Server already moved to a newer wipe ($current > $TS), updating history only"
-          else
-            curl -fsS -X PUT -H 'Content-Type: application/json' -d "$payload" \
-              "$db/servers/$SERVER_ID/fastMapFiles.json?$q" > /dev/null
-            echo "servers/$SERVER_ID/fastMapFiles updated"
-          fi
-          if [[ -n "$SNAPSHOT_ID" ]]; then
-            exists=$(curl -fsS "$db/servers/$SERVER_ID/history/$SNAPSHOT_ID/timestamp.json?$q")
-            if [[ "$exists" != "null" ]]; then
-              curl -fsS -X PUT -H 'Content-Type: application/json' -d "$payload" \
-                "$db/servers/$SERVER_ID/history/$SNAPSHOT_ID/fastMapFiles.json?$q" > /dev/null
-              echo "history/$SNAPSHOT_ID/fastMapFiles updated"
-            fi
-          fi
-
-      # Бэкап в скрытый репо (как в main.yml), но в отдельную папку fast/<server_id>/
-      - name: Push ZIP to private backup repo
-        id: backup
+          Write-Host "🔔 Updating Firebase with generated map URLs..."
+          
+          $server_id = "${{ github.event.inputs.server_id }}"
+          $ts = "${{ github.event.inputs.timestamp }}"
+          $firebase_url = "${{ secrets.FIREBASE_DATABASE_URL }}"
+          $firebase_secret = "${{ secrets.FIREBASE_SECRET }}"
+          $pub = $env:R2_PUBLIC_URL
+          
+          if (-not $firebase_url -or -not $firebase_secret) {
+            Write-Host "⚠️ Firebase secrets not configured. Skipping Firebase update."
+            Write-Host "   Add FIREBASE_DATABASE_URL and FIREBASE_SECRET to repository secrets."
+            exit 0
+          }
+          
+          # Убираем слеш на конце URL, если есть
+          $firebase_url = $firebase_url.TrimEnd('/')
+          $pub = $pub.TrimEnd('/')
+          
+          # Путь к папке снимка
+          $basePath = "$pub/maps/rendered/$server_id/$ts"
+          
+          $mapFilesObj = @{
+            imageWithLabels = "$basePath/output.png"
+            imageNoLabels = "$basePath/output_no_labels.png"
+            mapLabels = "$basePath/MapLabels.json"
+            lootSpawns = "$basePath/LootSpawns.json"
+          }
+          
+          Write-Host "Base Path: $basePath"
+          Write-Host ""
+          
+          # 1. Обновляем основной объект сервера
+          Write-Host "📝 Updating server object..."
+          $serverUrl = "$firebase_url/servers/$server_id.json?auth=$firebase_secret"
+          
+          $serverPayload = @{
+            hasGeneratedMap = $true
+            mapFiles = $mapFilesObj
+            lastMapGeneration = [int64]$ts
+          } | ConvertTo-Json -Depth 5
+          
+          try {
+            $response = Invoke-RestMethod -Uri $serverUrl -Method Patch -Body $serverPayload -ContentType "application/json"
+            Write-Host "✅ Server object updated!"
+          } catch {
+            Write-Host "❌ Server update failed: $($_.Exception.Message)"
+          }
+          
+          Write-Host ""
+          
+          # 2. Обновляем снимок в истории
+          $sid = "${{ github.event.inputs.snapshot_id }}"
+          
+          if ($sid) {
+            # Прямое обновление по ID (надёжный способ)
+            Write-Host "📝 Updating snapshot directly by ID: $sid"
+            $snapshotUrl = "$firebase_url/servers/$server_id/history/$sid/mapFiles.json?auth=$firebase_secret"
+            $snapshotPayload = $mapFilesObj | ConvertTo-Json -Depth 5
+            
+            try {
+              $response = Invoke-RestMethod -Uri $snapshotUrl -Method Put -Body $snapshotPayload -ContentType "application/json"
+              Write-Host "✅ Snapshot $sid updated with mapFiles!"
+            } catch {
+              Write-Host "❌ Snapshot update failed: $($_.Exception.Message)"
+            }
+          } else {
+            # Fallback: поиск по timestamp (для обратной совместимости)
+            Write-Host "⚠️ No snapshot_id provided. Falling back to timestamp search..."
+            Write-Host "🔍 Finding history snapshot with timestamp $ts..."
+            $historyUrl = "$firebase_url/servers/$server_id/history.json?auth=$firebase_secret"
+            
+            try {
+              $historyData = Invoke-RestMethod -Uri $historyUrl -Method Get
+              
+              if ($historyData) {
+                $snapshotId = $null
+                foreach ($key in $historyData.PSObject.Properties.Name) {
+                  $snapshot = $historyData.$key
+                  if ($snapshot.timestamp -eq [int64]$ts) {
+                    $snapshotId = $key
+                    break
+                  }
+                }
+                
+                if ($snapshotId) {
+                  Write-Host "✅ Found snapshot by timestamp: $snapshotId"
+                  $snapshotUrl = "$firebase_url/servers/$server_id/history/$snapshotId/mapFiles.json?auth=$firebase_secret"
+                  $snapshotPayload = $mapFilesObj | ConvertTo-Json -Depth 5
+                  $response = Invoke-RestMethod -Uri $snapshotUrl -Method Put -Body $snapshotPayload -ContentType "application/json"
+                  Write-Host "✅ Snapshot updated with mapFiles!"
+                } else {
+                  Write-Host "⚠️ No snapshot found with timestamp $ts"
+                }
+              } else {
+                Write-Host "⚠️ No history data found"
+              }
+            } catch {
+              Write-Host "❌ Snapshot update failed: $($_.Exception.Message)"
+              Write-Host "   This is not critical - mapFiles are saved in server object"
+            }
+          }
+      - name: 📦 Create ZIP Archive and Push to Private Repo
+        if: success()
         continue-on-error: true
         env:
           PAT: ${{ secrets.MAPS_REPO_PAT }}
           REPO_NAME: ${{ secrets.MAPS_REPO_NAME }}
+        shell: pwsh
         run: |
-          set -euo pipefail
-          if [[ -z "${PAT:-}" || -z "${REPO_NAME:-}" ]]; then
-            echo "::warning::MAPS_REPO_PAT / MAPS_REPO_NAME not set — skipping backup"
-            echo "pushed=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          name=$(printf '%s' "$MAP_NAME" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^[._-]*//' | cut -c1-100)
-          [[ -n "$name" ]] || name="$SERVER_ID"
-          zip_name="${name}_${TS}.zip"
-          (cd out && zip -q -9 "../$zip_name" output.png output_no_labels.png MapLabels.json LootSpawns.json)
-
+          $serverId = "${{ github.event.inputs.server_id }}"
+          $mapName = "${{ github.event.inputs.map_name }}"
+          $sanitizedMapName = $mapName -replace '[\\/:*?"<>|]', '_'
+          
+          Write-Host "📦 Creating ZIP archive..."
+          $zipPath = "maps/${sanitizedMapName}.zip"
+          Compress-Archive -Path maps/output.png, maps/output_no_labels.png, maps/MapLabels.json, maps/LootSpawns.json -DestinationPath $zipPath -Force
+          
+          Write-Host "🌐 Cloning destination repository..."
           git config --global user.name "Github Action"
           git config --global user.email "action@github.com"
-          git clone --depth 1 "https://x-access-token:${PAT}@github.com/${REPO_NAME}.git" backup_repo
-          dest="backup_repo/fast/$SERVER_ID"
-          mkdir -p "$dest"
-          cp "$zip_name" "$dest/"
+          
+          # Клонируем приватный репозиторий во временную папку
+          git clone https://x-access-token:$($env:PAT)@github.com/$($env:REPO_NAME).git temp_maps_repo
+          
+          # Создаем структуру папок (сервер_id)
+          $destFolder = "temp_maps_repo/$serverId"
+          if (-not (Test-Path $destFolder)) {
+            New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
+          }
+          
+          # Копируем архив в нужную папку
+          Copy-Item $zipPath "$destFolder/" -Force
+          
+          # Фиксируем изменения и пушим в ветку main
+          cd temp_maps_repo
+          git add .
+          git commit -m "Add/Update map zip for server $serverId"
+          git push origin main
+          
+          cd ..
+          Remove-Item -Recurse -Force temp_maps_repo
+          Write-Host "✅ ZIP successfully pushed!"
 
-          cd backup_repo
-          git add -A
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"; echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          git commit -q -m "Fast map zip for server $SERVER_ID ($TS)"
-          # полный рендер может пушить параллельно — пробуем несколько раз с rebase
-          for i in 1 2 3 4 5; do
-            if git push -q origin HEAD; then
-              echo "✅ Pushed fast/$SERVER_ID/$zip_name"
-              echo "pushed=true" >> "$GITHUB_OUTPUT"; exit 0
-            fi
-            echo "push rejected, retry $i..."
-            sleep $((i * 3))
-            git pull -q --rebase origin HEAD
-          done
-          echo "::error::Failed to push backup"; exit 1
-
-      - name: Summary
+      - name: 📝 Create summary
         if: success()
         env:
-          R2_UPLOADED: ${{ steps.r2.outputs.uploaded }}
-          BACKUP: ${{ steps.backup.outputs.pushed }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        shell: pwsh
         run: |
-          {
-            echo "## ⚡ Fast map render"
-            echo "- Server: \`$SERVER_ID\`, timestamp: \`$TS\`"
-            if [[ "$R2_UPLOADED" == "true" ]]; then
-              base="${R2_PUBLIC_URL%/}/maps/rendered/$SERVER_ID/$TS/fast"
-              echo "- R2: [output.png]($base/output.png) · [output_no_labels.png]($base/output_no_labels.png) · [MapLabels.json]($base/MapLabels.json) · [LootSpawns.json]($base/LootSpawns.json)"
-            else
-              echo "- R2 и Firebase пропущены: секреты не заданы"
-            fi
-            if [[ "$BACKUP" == "true" ]]; then
-              echo "- Бэкап: \`fast/$SERVER_ID/\` в приватном репо"
-            else
-              echo "- Бэкап не сделан (см. лог шага Push ZIP)"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          $fileSize = (Get-Item maps\output.png).Length / 1MB
+          $server_id = "${{ github.event.inputs.server_id }}"
+          $ts = "${{ github.event.inputs.timestamp }}"
+          $pub = $env:R2_PUBLIC_URL
+          $pub = $pub.TrimEnd('/')
+          
+          $basePath = "$pub/maps/rendered/$server_id/$ts"
+          
+          $summary = "## 🗺️ Rust Map Generated Successfully!`n`n"
+          $summary += "**Server ID:** $server_id`n"
+          $summary += "**Timestamp:** $ts`n"
+          $summary += "**Map Name:** ${{ github.event.inputs.map_name }}`n"
+          $summary += "**File size:** $([math]::Round($fileSize, 2)) MB`n`n"
+          $summary += "### 📦 Generated Files`n`n"
+          $summary += "All files are stored in: ``$basePath/```n`n"
+          $summary += "| File | URL |`n"
+          $summary += "|------|-----|`n"
+          $summary += "| Map with labels | [$basePath/output.png]($basePath/output.png) |`n"
+          $summary += "| Map without labels | [$basePath/output_no_labels.png]($basePath/output_no_labels.png) |`n"
+          $summary += "| MapLabels.json | [$basePath/MapLabels.json]($basePath/MapLabels.json) |`n"
+          $summary += "| LootSpawns.json | [$basePath/LootSpawns.json]($basePath/LootSpawns.json) |`n`n"
+          $summary += "### ⚙️ Method Used`n"
+          $summary += "- Rust Dedicated Server (official)`n"
+          $summary += "- Command: ``world.rendermap```n"
+          $summary += "- Oxide/uMod plugins for data extraction`n"
+          $summary += "- Uploaded to Cloudflare R2`n"
+          $summary += "- Firebase updated with URLs`n"
+          
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary
