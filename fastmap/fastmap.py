@@ -410,35 +410,30 @@ def _short(path):
 
 
 def loot_type(short):
-    """Копия LootSpawns.GetLootType (порядок проверок важен)."""
+    """Те же типы и правила, что у LootSpawns.GetSpawnType/GetOreType (полный рендер).
+    Спавнеры RustEdit (elite_crate_spawner, spawner_food_crates и т.п.) сводятся к тому ящику, который они ставят."""
     s = short.lower()
     for c in ('green', 'blue', 'red'):
         if f'{c}_card' in s or f'card_{c}' in s or f'{c}card' in s:
             return c.capitalize() + ' Card'
-    if 'hackablecrate' in s: return 'Locked Crate'
     if 'crate_elite' in s or 'elite_crate' in s: return 'Elite Crate'
-    if 'food' in s and ('crate' in s or 'box' in s): return 'Food Crate'
-    if 'medical' in s or 'med_crate' in s: return 'Medical Crate'
+    # crate_normal_2_food / crate_normal_2_medical — это еда и медицина, не военный ящик
+    if 'crate_normal_2_food' in s: return 'Food Crate'
+    if 'crate_normal_2_medical' in s: return 'Medical Crate'
     if 'crate_normal_2' in s: return 'Military Crate'
     if 'crate_normal' in s or 'normal_crates' in s: return 'Normal Crate'
-    if 'tool' in s and 'crate' in s: return 'Tool Crate'
-    if 'underwater' in s and 'crate' in s: return 'Underwater Crate'
-    if 'vehicle_parts' in s: return 'Vehicle Parts'
-    if 'tech_parts' in s: return 'Tech Crate'
-    if 'crate_ammunition' in s or 'ammo_crate' in s or 'crate_cannons' in s: return 'Ammo Crate'
-    if 'crate_fuel' in s or s == 'spawner_fuel': return 'Fuel Crate'
-    if ('basic' in s and 'crate' in s) or 'crate_mine' in s or 'mine_crate' in s or 'crate_shore' in s:
-        return 'Basic Crate'
+    if 'crate_food' in s or 'food_crate' in s: return 'Food Crate'
+    if 'crate_medical' in s or 'medical_crate' in s or 'med_crate' in s: return 'Medical Crate'
+    if 'crate_tools' in s or 'tools_crate' in s or 'tool_crate' in s: return 'Tool Crate'
     if 'diesel' in s: return 'Diesel Barrel'
     if 'oil_barrel' in s: return 'Oil Barrel'
     if 'barrel' in s: return 'Barrel'
     if 'minecart' in s or 'mine_cart' in s: return 'Minecart'
-    if 'trash' in s: return 'Trash Pile'
-    if '-ore' in s or s.startswith('ore_'):
-        for k, t in (('hqm', 'HQM Node'), ('stone', 'Stone Node'), ('metal', 'Metal Node'),
-                     ('sulfur', 'Sulfur Node'), ('random', 'Random Node')):
-            if k in s:
-                return t
+    if 'crate_underwater' in s or ('underwater' in s and 'crate' in s): return 'Underwater Crate'
+    if 'hqm-ore' in s or 'ore_hqm' in s: return 'HQM Node'
+    for k, t in (('stone', 'Stone Node'), ('metal', 'Metal Node'), ('sulfur', 'Sulfur Node')):
+        if f'{k}-ore' in s or f'ore_{k}' in s:
+            return t
     return None
 
 

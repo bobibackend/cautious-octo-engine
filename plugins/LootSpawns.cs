@@ -38,21 +38,66 @@ namespace Oxide.Plugins
 
             Puts("Starting loot spawns export...");
 
-            // Все сущности сервера: ящики (LootContainer, в т.ч. HackableLockedCrate), руда (OreResourceEntity),
-            // дизель и карты-пикапы (CollectibleEntity). Спавнеры из RustEdit к этому моменту уже поставили свои объекты.
-            int containers = 0, ores = 0, collectibles = 0;
+            // Найти все LootContainer объекты (реальные ящики, которые ты поставил в RustEdit)
+            var allContainers = UnityEngine.Object.FindObjectsOfType<LootContainer>();
+            Puts($"Found {allContainers.Length} loot containers");
+
+            foreach (var container in allContainers)
+            {
+                if (container == null) continue;
+
+                var prefabName = container.ShortPrefabName;
+                var position = container.transform.position;
+                
+                string spawnType = GetSpawnType(prefabName);
+                
+                if (!string.IsNullOrEmpty(spawnType))
+                {
+                    spawns.Add(new LootSpawn
+                    {
+                        Type = spawnType,
+                        X = position.x,
+                        Z = position.z,
+                        PrefabName = prefabName
+                    });
+                }
+            }
+
+            // Найти все OreResourceEntity (камни руды, которые ты поставил в RustEdit)
+            var allOres = UnityEngine.Object.FindObjectsOfType<OreResourceEntity>();
+            Puts($"Found {allOres.Length} ore nodes");
+
+            foreach (var ore in allOres)
+            {
+                if (ore == null) continue;
+
+                var prefabName = ore.ShortPrefabName;
+                var position = ore.transform.position;
+                
+                string spawnType = GetOreType(prefabName);
+                
+                if (!string.IsNullOrEmpty(spawnType))
+                {
+                    spawns.Add(new LootSpawn
+                    {
+                        Type = spawnType,
+                        X = position.x,
+                        Z = position.z,
+                        PrefabName = prefabName
+                    });
+                }
+            }
+
+            // Дизель и ключ-карты (CollectibleEntity и прочие пикапы — не LootContainer)
+            int collectibles = 0;
             foreach (var networkable in BaseNetworkable.serverEntities)
             {
                 var entity = networkable as BaseEntity;
                 if (entity == null || entity.IsDestroyed) continue;
-
-                if (entity is LootContainer) containers++;
-                else if (entity is OreResourceEntity) ores++;
-                else if (entity is CollectibleEntity) collectibles++;
-                else continue;
+                if (entity is LootContainer || entity is OreResourceEntity) continue;
 
                 var prefabName = entity.ShortPrefabName;
-                string spawnType = GetLootType(prefabName);
+                string spawnType = GetCollectibleType(prefabName);
                 if (string.IsNullOrEmpty(spawnType)) continue;
 
                 var position = entity.transform.position;
@@ -63,8 +108,9 @@ namespace Oxide.Plugins
                     Z = position.z,
                     PrefabName = prefabName
                 });
+                collectibles++;
             }
-            Puts($"Found {containers} loot containers, {ores} ore nodes, {collectibles} collectibles; exported {spawns.Count}");
+            Puts($"Found {collectibles} diesel barrels / keycards");
 
             // Точки появления игроков — та же область, из которой берёт точки сам сервер (SpawnHandler)
             AddPlayerSpawns(spawns);
@@ -91,6 +137,9 @@ namespace Oxide.Plugins
             Puts($"Stone Nodes: {spawns.Count(s => s.Type == "Stone Node")}");
             Puts($"Metal Nodes: {spawns.Count(s => s.Type == "Metal Node")}");
             Puts($"Sulfur Nodes: {spawns.Count(s => s.Type == "Sulfur Node")}");
+            Puts($"HQM Nodes: {spawns.Count(s => s.Type == "HQM Node")}");
+            Puts($"Diesel Barrels: {spawns.Count(s => s.Type == "Diesel Barrel")}");
+            Puts($"Keycards: {spawns.Count(s => s.Type.EndsWith(" Card"))}");
             Puts($"Player Spawns: {spawns.Count(s => s.Type == "Player Spawn")}");
         }
 
@@ -222,51 +271,73 @@ namespace Oxide.Plugins
             Puts($"Player spawns: {pc.Count} spawnable cells of {res}x{res}, {kept.Count} points");
         }
 
-        // Тип по ShortPrefabName. Порядок проверок важен; копия loot_type() в fastmap.py.
-        // Имена сверены с GameManifest игры (обновление от 02.10.2026).
-        private static string GetLootType(string prefabName)
+        private string GetSpawnType(string prefabName)
+        {
+            // Elite Crates
+            if (prefabName.Contains("crate_elite")) return "Elite Crate";
+            
+            // crate_normal_2_food / crate_normal_2_medical — это еда и медицина, не военный ящик
+            if (prefabName.Contains("crate_normal_2_food")) return "Food Crate";
+            if (prefabName.Contains("crate_normal_2_medical")) return "Medical Crate";
+
+            // Military Crates
+            if (prefabName.Contains("crate_normal_2") || 
+                prefabName.Contains("crate_normal_2_military")) return "Military Crate";
+            
+            // Normal Crates
+            if (prefabName.Contains("crate_normal") && !prefabName.Contains("crate_normal_2")) return "Normal Crate";
+            
+            // Food Crates
+            if (prefabName.Contains("crate_food_")) return "Food Crate";
+            
+            // Medical Crates
+            if (prefabName.Contains("crate_medical")) return "Medical Crate";
+            
+            // Tool Crates
+            if (prefabName.Contains("crate_tools")) return "Tool Crate";
+            
+            // Дизель
+            if (prefabName.Contains("diesel")) return "Diesel Barrel";
+
+            // Oil Barrels (красные с топливом)
+            if (prefabName.Contains("oil_barrel")) return "Oil Barrel";
+            
+            // Regular Barrels (обычные)
+            if (prefabName.Contains("barrel")) return "Barrel";
+            
+            // Minecart (в туннелях)
+            if (prefabName.Contains("minecart")) return "Minecart";
+            
+            // Underwater crates
+            if (prefabName.Contains("crate_underwater")) return "Underwater Crate";
+            
+            return null;
+        }
+
+        private string GetOreType(string prefabName)
+        {
+            // Большие камни руды (которые ты ставишь в RustEdit)
+            if (prefabName.Contains("stone-ore")) return "Stone Node";
+            if (prefabName.Contains("metal-ore")) return "Metal Node";
+            if (prefabName.Contains("sulfur-ore")) return "Sulfur Node";
+            if (prefabName.Contains("hqm-ore") || prefabName.Contains("ore_hqm")) return "HQM Node";
+            
+            return null;
+        }
+
+        // Дизель (diesel_collectable) и ключ-карты (keycard_*_pickup)
+        private static string GetCollectibleType(string prefabName)
         {
             if (string.IsNullOrEmpty(prefabName)) return null;
             var s = prefabName.ToLowerInvariant();
 
-            // Ключ-карты (на столах, пикапы, спавнеры)
             foreach (var c in new[] { "green", "blue", "red" })
             {
                 if (s.Contains(c + "_card") || s.Contains("card_" + c) || s.Contains(c + "card"))
                     return char.ToUpperInvariant(c[0]) + c.Substring(1) + " Card";
             }
 
-            if (s.Contains("hackablecrate")) return "Locked Crate";
-            if (s.Contains("crate_elite") || s.Contains("elite_crate")) return "Elite Crate";
-            // crate_normal_2_food / crate_normal_2_medical — это еда и медицина, не военный ящик
-            if (s.Contains("food") && (s.Contains("crate") || s.Contains("box"))) return "Food Crate";
-            if (s.Contains("medical") || s.Contains("med_crate")) return "Medical Crate";
-            if (s.Contains("crate_normal_2")) return "Military Crate";
-            if (s.Contains("crate_normal") || s.Contains("normal_crates")) return "Normal Crate";
-            if (s.Contains("tool") && s.Contains("crate")) return "Tool Crate";
-            if (s.Contains("underwater") && s.Contains("crate")) return "Underwater Crate";
-            if (s.Contains("vehicle_parts")) return "Vehicle Parts";
-            if (s.Contains("tech_parts")) return "Tech Crate";
-            if (s.Contains("crate_ammunition") || s.Contains("ammo_crate") || s.Contains("crate_cannons")) return "Ammo Crate";
-            if (s.Contains("crate_fuel") || s == "spawner_fuel") return "Fuel Crate";
-            if ((s.Contains("basic") && s.Contains("crate")) || s.Contains("crate_mine") || s.Contains("mine_crate") || s.Contains("crate_shore"))
-                return "Basic Crate";
-
             if (s.Contains("diesel")) return "Diesel Barrel";
-            if (s.Contains("oil_barrel")) return "Oil Barrel";
-            if (s.Contains("barrel")) return "Barrel";
-            if (s.Contains("minecart") || s.Contains("mine_cart")) return "Minecart";
-            if (s.Contains("trash")) return "Trash Pile";
-
-            // Руда: stone-ore / metal-ore / sulfur-ore / hqm-ore и radtown/ore_*
-            if (s.Contains("-ore") || s.StartsWith("ore_"))
-            {
-                if (s.Contains("hqm")) return "HQM Node";
-                if (s.Contains("stone")) return "Stone Node";
-                if (s.Contains("metal")) return "Metal Node";
-                if (s.Contains("sulfur")) return "Sulfur Node";
-                if (s.Contains("random")) return "Random Node";
-            }
             return null;
         }
     }
