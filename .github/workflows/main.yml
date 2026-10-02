@@ -226,9 +226,9 @@ jobs:
           $pluginDir = "rust_server\oxide\plugins"
           New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
           
-          Copy-Item "MonumentFinder.cs" "$pluginDir\MonumentFinder.cs" -Force
-          Copy-Item "MapLabels.cs" "$pluginDir\MapLabels.cs" -Force
-          Copy-Item "LootSpawns.cs" "$pluginDir\LootSpawns.cs" -Force
+          Copy-Item "plugins\MonumentFinder.cs" "$pluginDir\MonumentFinder.cs" -Force
+          Copy-Item "plugins\MapLabels.cs" "$pluginDir\MapLabels.cs" -Force
+          Copy-Item "plugins\LootSpawns.cs" "$pluginDir\LootSpawns.cs" -Force
           
           Write-Host "✅ Plugins copied to $pluginDir"
           Get-ChildItem $pluginDir | Format-Table Name, Length
@@ -359,7 +359,7 @@ jobs:
           $original.Dispose()
           
           # Загружаем кастомный шрифт Permanent Marker
-          $fontPath = "permanent-marker-v16-latin-regular.ttf"
+          $fontPath = (Resolve-Path "assets\fonts\permanent-marker-v16-latin-regular.ttf").Path
           $fontCollection = New-Object System.Drawing.Text.PrivateFontCollection
           $fontCollection.AddFontFile($fontPath)
           $permanentMarkerFamily = $fontCollection.Families[0]
